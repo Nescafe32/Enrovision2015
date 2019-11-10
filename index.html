@@ -1,0 +1,292 @@
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8"/>
+    <title>Eurovision 2015</title>
+    <script src="node_modules/gojs/release/go.js"></script>
+</head>
+
+<body onload="loadDataAndBuildTree()">
+<script>
+    function InteractiveForceDirectedLayout() {
+        go.ForceDirectedLayout.call(this);
+        this._isObserving = false;
+    }
+
+    go.Diagram.inherit(InteractiveForceDirectedLayout, go.ForceDirectedLayout);
+
+    InteractiveForceDirectedLayout.prototype.isFixed = function (v) {
+        return v.node.isSelected;
+    };
+
+    InteractiveForceDirectedLayout.prototype.doLayout = function (coll) {
+        if (!this._isObserving) {
+            this._isObserving = true;
+            let lay = this;
+            this.diagram.addModelChangedListener(function (e) {
+                if (e.modelChange !== "" ||
+                    (e.change === go.ChangedEvent.Transaction && e.propertyName === "StartingFirstTransaction")) {
+                    lay.network = null;
+                }
+            });
+        }
+        let net = this.network;
+
+        if (net === null) {
+            this.network = net = this.makeNetwork(coll);
+        } else {
+            this.diagram.nodes.each(function (n) {
+                let v = net.findVertex(n);
+                if (v !== null) v.bounds = n.actualBounds;
+            });
+        }
+
+        go.ForceDirectedLayout.prototype.doLayout.call(this, coll);
+        this.network = net;
+    };
+
+    let nodes;
+    let links;
+
+    const NODE_FOCUSED_TEXT_COLOR = "red";
+    const NODE_NOT_FOCUSED_TEXT_COLOR = "black";
+    const LINK_FOCUSED_COLOR = "green";
+    const LINK_NOT_FOCUSED_COLOR = "lightBlue";
+
+    function loadDataAndBuildTree() {
+        const xhr = new XMLHttpRequest();
+
+        xhr.onreadystatechange = function () {
+            if (this.readyState === 4 && this.status === 200) {
+                let response = this.responseText;
+                let jsonData = JSON.parse(response);
+
+                nodes = jsonData.nodes;
+                links = jsonData.links;
+
+                init();
+            }
+        };
+
+        xhr.open("GET", "data.json", true);
+        xhr.send();
+    }
+
+    function init() {
+        const $ = go.GraphObject.make;
+
+        let countriesDiagram =
+            $(go.Diagram, "countriesDiagramDiv",
+                {
+                    layout:
+                        $(InteractiveForceDirectedLayout,
+                            {defaultSpringLength: 30, defaultElectricalCharge: -80}),
+                    "undoManager.isEnabled": true,
+                    allowDragOut: true,
+                    autoScale: go.Diagram.Uniform,
+                    allowCopy: false,
+                    allowDelete: false,
+                    "SelectionMoved": function (e) {
+                        e.diagram.layout.invalidateLayout();
+                    }
+                });
+
+        countriesDiagram.toolManager.draggingTool.doMouseMove = function () {
+            go.DraggingTool.prototype.doMouseMove.call(this);
+            if (this.isActive) {
+                this.diagram.layout.invalidateLayout();
+            }
+        };
+
+        initNodesTemplate(countriesDiagram, $);
+        initLinksTemplate(countriesDiagram, $);
+
+        createTree(countriesDiagram, true);
+    }
+
+    function initNodesTemplate(countriesDiagram, $) {
+
+        function stayInViewport(part, pt, gridpt) {
+            let diagram = part.diagram;
+
+            if (diagram === null) {
+                return pt;
+            }
+
+            let v = diagram.viewportBounds.copy();
+            v.subtractMargin(diagram.padding);
+
+            let b = part.actualBounds;
+            let loc = part.location;
+
+            let x = Math.max(v.x + 1, Math.min(pt.x, v.right - b.width - 2)) + (loc.x - b.x);
+            let y = Math.max(v.y + 1, Math.min(pt.y, v.bottom - b.height - 2)) + (loc.y - b.y);
+
+            return new go.Point(x, y);
+        }
+
+        countriesDiagram.nodeTemplate =
+            $(go.Node, "Spot",
+                {dragComputation: stayInViewport},
+                {
+                    locationSpot: go.Spot.Center,
+                    mouseEnter: (e, node) => highlightNode(node, true, NODE_FOCUSED_TEXT_COLOR),
+                    mouseLeave: (e, node) => highlightNode(node, false, NODE_NOT_FOCUSED_TEXT_COLOR)
+                },
+                new go.Binding("text", "text"),
+                $(go.Shape, "Ellipse",
+                    {
+                        fill: "lightgray",
+                        stroke: null,
+                        desiredSize: new go.Size(20, 20),
+                        name: "SHAPE",
+                    },
+                    new go.Binding("fill", "fill")),
+                $(go.Picture,
+                    {margin: 2, column: 0, visible: false, desiredSize: new go.Size(35, 35)},
+                    new go.Binding("source", "text", countryFlagConverter),
+                    new go.Binding("visible", "text", function (nat) {
+                        return nat !== undefined;
+                    }),
+                ),
+                $(go.TextBlock,
+                    {margin: 10, font: "bold 12px Arial", name: "TEXT"},
+                    new go.Binding("text", "text")),
+            );
+    }
+
+    function highlightNode(node, isHighlight, nodeTextColor) {
+        node.diagram.clearHighlighteds();
+        node.findLinksOutOf().each((link) => highlightLink(link, isHighlight));
+        node.isHighlighted = isHighlight;
+
+        let text = node.findObject("TEXT");
+        text.stroke = nodeTextColor;
+    }
+
+    function countryFlagConverter(country) {
+        // return "https://www.nwoods.com/images/emojiflags/" + country.text.toLowerCase() + ".png";
+        return "images/flags/" + country + ".png";
+    }
+
+    function initLinksTemplate(countriesDiagram, $) {
+        countriesDiagram.linkTemplate =
+            $(go.Link,
+                {
+                    selectionAdornmentTemplate:
+                        $(go.Adornment,
+                            $(go.Shape,
+                                {isPanelMain: true, stroke: "dodgerblue", strokeWidth: 3}),
+                            $(go.Shape,
+                                {toArrow: "Standard", fill: "dodgerblue", stroke: null, scale: 1})
+                        ),
+                    routing: go.Link.Normal,
+                    curve: go.Link.Bezier,
+                    toShortLength: 2,
+                    mouseEnter: (e, link) => highlightLink(link, true),
+                    mouseLeave: (e, link) => highlightLink(link, false)
+                },
+                $(go.Shape,
+                    {name: "LINKLINE"},
+                    new go.Binding("stroke", "isHighlighted",
+                        function (h) {
+                            return h ? LINK_FOCUSED_COLOR : LINK_NOT_FOCUSED_COLOR;
+                        })
+                        .ofObject(),
+                    new go.Binding("strokeWidth", determineLinkWidth),
+                ),
+                $(go.Shape,
+                    {name: "LINKARROW", toArrow: "Standard"},
+                    new go.Binding("strokeWidth", "isHighlighted",
+                        function (h) {
+                            return h ? 2 : 1;
+                        })
+                        .ofObject()),
+                $(go.Panel, "Auto",
+                    $(go.Shape,
+                        {
+                            fill: $(go.Brush, "Radial", {
+                                0: "rgb(240, 240, 240)",
+                                0.3: "rgb(240, 240, 240)",
+                                1: "rgba(240, 240, 240, 0)"
+                            }),
+                            stroke: null
+                        }),
+                    $(go.TextBlock,
+                        {
+                            textAlign: "center",
+                            font: "12px Arial",
+                            stroke: "#555555",
+                            margin: 4
+                        },
+                        new go.Binding("text", "score"))
+                )
+            );
+    }
+
+    function highlightLink(link, isHighlighted) {
+        link.isHighlighted = isHighlighted;
+        link.fromNode.isHighlighted = isHighlighted;
+        link.toNode.isHighlighted = isHighlighted;
+    }
+
+    let minScore;
+
+    function determineLinkWidth(link) {
+        if (minScore === undefined) {
+            minScore = links.reduce((min, p) => p.score < min ? p.score : min, links[0].score);
+        }
+
+        // enough, since only 2 possible values (10 and 12)
+        return link.score > minScore ? 3 : 1;
+    }
+
+    function createTree(countriesDiagram, applyDirty) {
+        countriesDiagram.startTransaction("createTree");
+
+        createNodes(countriesDiagram, applyDirty);
+        createLinks(countriesDiagram);
+
+        countriesDiagram.commitTransaction("createTree");
+    }
+
+    function createNodes(countriesDiagram, applyDirty) {
+        let nodeArray = [];
+
+        let countriesWithoutVotes = [];
+
+        // json contains countries without links. with interactive force layout result looks weird..
+        if (applyDirty) {
+            countriesWithoutVotes = [1, 10, 41, 20, 29, 40]
+        }
+
+        nodes.filter(e => countriesWithoutVotes && !countriesWithoutVotes.includes(e.id)).forEach(node => {
+            nodeArray.push({
+                key: node.id,
+                text: node["country"],
+            });
+        });
+
+        countriesDiagram.model.nodeDataArray = nodeArray;
+    }
+
+    function createLinks(countriesDiagram) {
+        let linkArray = [];
+
+        links.forEach(link => {
+            linkArray.push({
+                from: link.source,
+                to: link.target,
+                score: link.score
+            });
+        });
+
+        countriesDiagram.model.linkDataArray = linkArray;
+    }
+</script>
+<div>
+    <div id="countriesDiagramDiv" style="background: white; border: solid 1px black; width: 100%; height: 100%"></div>
+</div>
+</body>
+
+</html>
